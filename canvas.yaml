@@ -21,11 +21,11 @@ spec:
               - name: issue_number
                 title: Issue Number
                 type: string
-                defaultString: "5368"
+                defaultString: "1"
               - name: repo
                 title: Repository (owner/name)
                 type: string
-                defaultString: "superplanehq/superplane"
+                defaultString: "prathamssaraf/plane_hackathon"
               - name: base_branch
                 title: Base Branch
                 type: string
@@ -38,10 +38,6 @@ spec:
                 title: K2 API Key
                 type: string
                 placeholder: IFM-...
-              - name: repo_name
-                title: Repo Name (just the name, no owner)
-                type: string
-                defaultString: "plane_hackathon"
               - name: factory_secret
                 title: Factory Secret
                 type: string
@@ -49,7 +45,6 @@ spec:
             payload:
               issue_number: '{{ parameters["issue_number"] }}'
               repo: '{{ parameters["repo"] }}'
-              repo_name: '{{ parameters["repo_name"] }}'
               base_branch: '{{ parameters["base_branch"] }}'
               github_token: '{{ parameters["github_token"] }}'
               k2_api_key: '{{ parameters["k2_api_key"] }}'
@@ -76,44 +71,13 @@ spec:
         timeoutSeconds: 28
         successCodes: 2xx
 
-    # ── STAGE 2: Generate spec via coding service ────────────────────────────
-    - id: generate-spec
-      name: Generate Spec
-      type: TYPE_ACTION
-      component: http
-      position:
-        x: 960
-        "y": 0
-      configuration:
-        method: POST
-        url: "https://software-factory-coder.onrender.com/spec"
-        headers:
-          - name: Content-Type
-            value: application/json
-          - name: X-Factory-Secret
-            value: '{{ root().data.factory_secret }}'
-        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","issue_title":"{{ $[''Get Issue''].data.body.title }}","issue_body":"{{ $[''Get Issue''].data.body.body }}","k2_api_key":"{{ root().data.k2_api_key }}"}'
-        timeoutSeconds: 30
-        successCodes: 2xx
-
-    # ── VALIDATE spec non-empty ───────────────────────────────────────────────
-    - id: validate-spec
-      name: Validate Spec
-      type: TYPE_ACTION
-      component: filter
-      position:
-        x: 1440
-        "y": 0
-      configuration:
-        expression: '$["Generate Spec"].data.body.title.length > 0'
-
-    # ── STAGE 3a: Queue implementation job ───────────────────────────────────
+    # ── STAGE 2+3a: Queue implementation (service generates spec internally) ───
     - id: queue-implement
       name: Queue Implementation
       type: TYPE_ACTION
       component: http
       position:
-        x: 1920
+        x: 960
         "y": 0
       configuration:
         method: POST
@@ -123,7 +87,7 @@ spec:
             value: application/json
           - name: X-Factory-Secret
             value: '{{ root().data.factory_secret }}'
-        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","spec":{{ $[''Generate Spec''].data.body }},"github_token":"{{ root().data.github_token }}"}'
+        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","github_token":"{{ root().data.github_token }}","issue_title":"{{ $[''Get Issue''].data.body.title }}","k2_api_key":"{{ root().data.k2_api_key }}"}'
         timeoutSeconds: 28
         successCodes: 2xx
 
@@ -319,14 +283,8 @@ spec:
       targetId: get-issue
       channel: default
     - sourceId: get-issue
-      targetId: generate-spec
-      channel: success
-    - sourceId: generate-spec
-      targetId: validate-spec
-      channel: success
-    - sourceId: validate-spec
       targetId: queue-implement
-      channel: default
+      channel: success
     - sourceId: queue-implement
       targetId: poll-implement
       channel: success

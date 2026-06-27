@@ -60,8 +60,10 @@ class ImplementRequest(BaseModel):
     repo: str
     issue_number: str
     base_branch: str = "main"
-    spec: dict
+    spec: dict | None = None
     github_token: str
+    issue_title: str = ""
+    k2_api_key: str = ""
 
 
 class DeployRequest(BaseModel):
@@ -188,9 +190,23 @@ def apply_files(files: list[dict], cwd: str) -> list[str]:
 
 def _run_implement(job_id: str, req: ImplementRequest):
     JOBS[job_id]["status"] = "running"
+    client = make_k2_client(req.k2_api_key or K2_API_KEY)
     spec = req.spec
+    if not spec:
+        raw = k2_complete(client,
+            system="You are a software architect. Reply ONLY with a valid JSON object, no markdown.",
+            user=(
+                f"Spec GitHub issue #{req.issue_number} in repo {req.repo}.\n"
+                f"Title: {req.issue_title or 'see issue'}\n\n"
+                f"Return JSON with fields: title, summary, files_to_modify (array), "
+                f"implementation_steps (array), acceptance_criteria (array), "
+                f"branch_name (use feature/issue-{req.issue_number})."
+            ),
+            max_tokens=2048,
+        )
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        spec = json.loads(match.group(0)) if match else {"branch_name": f"feature/issue-{req.issue_number}", "title": req.issue_title, "summary": "", "files_to_modify": [], "implementation_steps": [], "acceptance_criteria": []}
     branch = re.sub(r"[^a-zA-Z0-9/_-]", "-", spec.get("branch_name", f"feature/issue-{req.issue_number}"))[:80]
-    client = make_k2_client(K2_API_KEY)
     try:
         with cloned_repo(req.repo, req.github_token, req.base_branch) as tmpdir:
             _run(["git", "checkout", "-b", branch], cwd=tmpdir)
