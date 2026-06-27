@@ -49,13 +49,13 @@ spec:
     - id: generate-spec
       name: Generate Spec
       type: TYPE_ACTION
-      component: claude.textPrompt
+      component: openai.textPrompt
       position:
         x: 960
         "y": 0
       configuration:
-        model: claude-sonnet-4-6
-        prompt: |-
+        model: MBZUAI-IFM/K2-Think-v2
+        input: |-
           You are a senior software architect. Given the GitHub issue below, produce
           a precise, actionable implementation spec that a coding agent can follow.
 
