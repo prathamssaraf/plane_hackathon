@@ -143,27 +143,9 @@ def implement_with_k2(client: OpenAI, spec: dict, repo: str, issue_number: str, 
     steps = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(spec.get("implementation_steps", [])))
 
     raw = k2_complete(client,
-        system="You are an expert software engineer. Respond ONLY with a valid JSON array, no markdown.",
-        user=f"""Implement GitHub issue #{issue_number} in the {repo} repository.
-
-Title: {spec.get("title", "")}
-Summary: {spec.get("summary", "")}
-
-Steps:
-{steps}
-
-Repository files:
-{tree}
-
-Relevant file contents:
-{existing}
-
-Return a JSON array of files to write:
-[{{"path": "relative/path/to/file", "content": "complete file content"}}]
-
-Only include files you actually change. Keep changes minimal.
-""",
-        max_tokens=4096,
+        system='You are a code generator. Output ONLY a JSON array starting with [ and ending with ]. No prose, no markdown.',
+        user=f'Issue #{issue_number}: {spec.get("title","")}. {spec.get("summary","")}. Steps: {"; ".join(spec.get("implementation_steps",[])[:4])}. Repo files: {tree[:400]}. Relevant code: {existing[:800]}. Return [{{"path":"...","content":"full file"}}]. Only changed files.',
+        max_tokens=8192,
     )
 
     match = re.search(r"\[.*\]", raw, re.DOTALL)
