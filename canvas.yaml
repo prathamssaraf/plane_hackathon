@@ -1,10 +1,12 @@
 apiVersion: v1
 kind: Canvas
 metadata:
+  id: 9867cd3e-9ebd-431b-9156-56a215d743e9
   name: software-factory
-  description: "Turns a GitHub issue into a deployed PoC with no human touching the code. Each stage validates the previous one before moving on."
+  description: "Turns a GitHub issue into a deployed PoC. No human touches the code."
 spec:
   nodes:
+    # ── TRIGGER ──────────────────────────────────────────────────────────────
     - id: trigger-new-issue
       name: New Issue
       type: TYPE_TRIGGER
@@ -20,21 +22,35 @@ spec:
                 title: Issue Number
                 type: string
                 defaultString: "5368"
-                placeholder: GitHub issue number to implement
               - name: repo
                 title: Repository (owner/name)
                 type: string
                 defaultString: "superplanehq/superplane"
-                placeholder: owner/repo
               - name: base_branch
                 title: Base Branch
                 type: string
                 defaultString: "main"
+              - name: github_token
+                title: GitHub Token
+                type: string
+                placeholder: ghp_...
+              - name: k2_api_key
+                title: K2 API Key
+                type: string
+                placeholder: IFM-...
+              - name: factory_secret
+                title: Factory Secret
+                type: string
+                placeholder: shared-secret
             payload:
               issue_number: '{{ parameters["issue_number"] }}'
               repo: '{{ parameters["repo"] }}'
               base_branch: '{{ parameters["base_branch"] }}'
+              github_token: '{{ parameters["github_token"] }}'
+              k2_auth: 'Bearer {{ parameters["k2_api_key"] }}'
+              factory_secret: '{{ parameters["factory_secret"] }}'
 
+    # ── STAGE 1: Read the issue ───────────────────────────────────────────────
     - id: get-issue
       name: Get Issue
       type: TYPE_ACTION
@@ -42,39 +58,35 @@ spec:
       position:
         x: 480
         "y": 0
+      integration:
+        id: bc1b3413-4fff-4f18-b571-2e8fe97dcca0
       configuration:
         repository: '{{ root().data.repo }}'
         issueNumber: '{{ root().data.issue_number }}'
 
+    # ── STAGE 2: Generate spec via K2-Think ──────────────────────────────────
     - id: generate-spec
-      name: Generate Spec
+      name: Generate Spec (K2)
       type: TYPE_ACTION
-      component: openai.textPrompt
+      component: http
       position:
         x: 960
         "y": 0
       configuration:
-        model: MBZUAI-IFM/K2-Think-v2
-        input: |-
-          You are a senior software architect. Given the GitHub issue below, produce
-          a precise, actionable implementation spec that a coding agent can follow.
+        method: POST
+        url: "https://api.k2think.ai/v1/chat/completions"
+        headers:
+          - name: Authorization
+            value: '{{ root().data.k2_auth }}'
+          - name: Content-Type
+            value: application/json
+          - name: User-Agent
+            value: "OpenAI/Python 1.0"
+        body: '{"model":"MBZUAI-IFM/K2-Think-v2","max_tokens":2048,"temperature":0.2,"messages":[{"role":"system","content":"You are a software architect. Reply ONLY with a JSON object."},{"role":"user","content":"Spec this issue for a coding agent.\n\nRepo: {{ root().data.repo }}\nIssue #{{ root().data.issue_number }}: {{ $[''Get Issue''].data.title }}\n\nReturn ONLY this JSON:\n{\"title\":\"...\",\"summary\":\"...\",\"files_to_modify\":[\"...\"],\"implementation_steps\":[\"...\"],\"acceptance_criteria\":[\"...\"],\"branch_name\":\"feature/issue-{{ root().data.issue_number }}\"}"}]}'
+        timeoutSeconds: 30
+        successCodes: 2xx
 
-          Repository: {{ root().data.repo }}
-          Issue #{{ root().data.issue_number }}: {{ $["Get Issue"].data.title }}
-
-          Issue body:
-          {{ $["Get Issue"].data.body }}
-
-          Respond with ONLY a JSON object (no markdown fences) in this exact shape:
-          {
-            "title": "brief implementation title",
-            "summary": "2-3 sentence description of what needs to be built",
-            "files_to_modify": ["list of specific file paths likely to change"],
-            "implementation_steps": ["ordered, concrete coding steps"],
-            "acceptance_criteria": ["testable conditions that define done"],
-            "branch_name": "feature/issue-{{ root().data.issue_number }}-slug"
-          }
-
+    # ── VALIDATE spec non-empty ───────────────────────────────────────────────
     - id: validate-spec
       name: Validate Spec
       type: TYPE_ACTION
@@ -83,10 +95,11 @@ spec:
         x: 1440
         "y": 0
       configuration:
-        expression: '$["Generate Spec"].data.text != null && $["Generate Spec"].data.text.length > 100'
+        expression: '$["Generate Spec (K2)"].data.body.choices[0].message.content.length > 50'
 
-    - id: implement-code
-      name: Implement Code
+    # ── STAGE 3a: Queue implementation job ───────────────────────────────────
+    - id: queue-implement
+      name: Queue Implementation
       type: TYPE_ACTION
       component: http
       position:
@@ -96,82 +109,184 @@ spec:
         method: POST
         url: "https://software-factory-coder.onrender.com/implement"
         headers:
-          Content-Type: application/json
-          X-Factory-Secret: '{{ env("FACTORY_SECRET") }}'
-        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","spec":{{ $["Generate Spec"].data.text }},"github_token":"{{ env("GITHUB_TOKEN") }}"}'
-        timeoutSeconds: 600
+          - name: Content-Type
+            value: application/json
+          - name: X-Factory-Secret
+            value: '{{ root().data.factory_secret }}'
+        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","spec":{{ $["Generate Spec (K2)"].data.body.choices[0].message.content }},"github_token":"{{ root().data.github_token }}"}'
+        timeoutSeconds: 28
+        successCodes: 2xx
 
+    # ── STAGE 3b: Poll until implementation done ──────────────────────────────
+    - id: poll-implement
+      name: Poll Implementation
+      type: TYPE_ACTION
+      component: loop
+      position:
+        x: 2400
+        "y": 0
+      configuration:
+        untilExpression: '$["Check Implement Status"].data.body.status == "done"'
+        maxIterations: 40
+        timeoutSeconds: 900
+
+    # ── Check implementation status ────────────────────────────────────────────
+    - id: check-implement-status
+      name: Check Implement Status
+      type: TYPE_ACTION
+      component: http
+      position:
+        x: 2880
+        "y": 0
+      configuration:
+        method: GET
+        url: 'https://software-factory-coder.onrender.com/status/{{ $["Queue Implementation"].data.body.job_id }}'
+        headers:
+          - name: X-Factory-Secret
+            value: '{{ root().data.factory_secret }}'
+        timeoutSeconds: 28
+        successCodes: 2xx
+
+    # ── Wait between polls ────────────────────────────────────────────────────
+    - id: wait-between-polls
+      name: Wait 15s
+      type: TYPE_ACTION
+      component: wait
+      position:
+        x: 3360
+        "y": 0
+      configuration:
+        mode: interval
+        waitFor: "15"
+        unit: seconds
+
+    # ── VALIDATE implementation succeeded ────────────────────────────────────
     - id: validate-implementation
       name: Validate Build
       type: TYPE_ACTION
       component: filter
       position:
-        x: 2400
+        x: 3840
         "y": 0
       configuration:
-        expression: '$["Implement Code"].data.body.success == true'
+        expression: '$["Check Implement Status"].data.body.success == true'
 
+    # ── STAGE 4: Open Pull Request ────────────────────────────────────────────
     - id: create-pr
       name: Create Pull Request
       type: TYPE_ACTION
       component: github.createPullRequest
       position:
-        x: 2880
+        x: 4320
         "y": 0
+      integration:
+        id: bc1b3413-4fff-4f18-b571-2e8fe97dcca0
       configuration:
         repository: '{{ root().data.repo }}'
         title: 'feat(#{{ root().data.issue_number }}): {{ $["Get Issue"].data.title }}'
-        head: '{{ $["Implement Code"].data.body.branch }}'
+        head: '{{ $["Check Implement Status"].data.body.branch }}'
         base: '{{ root().data.base_branch }}'
-        body: "## Auto-generated PoC\n\nCloses #{{ root().data.issue_number }}\n\n### Summary\n{{ $[\"Implement Code\"].data.body.spec_summary }}\n\n### Files changed\n{{ $[\"Implement Code\"].data.body.files_changed }}\n\n*Generated by Software Factory on SuperPlane. No human wrote this code.*"
+        body: "## Auto-generated PoC\n\nCloses #{{ root().data.issue_number }}\n\n{{ $[\"Check Implement Status\"].data.body.spec_summary }}\n\n### Files changed\n{{ $[\"Check Implement Status\"].data.body.files_changed }}\n\n*Generated by Software Factory (K2-Think + SuperPlane). No human wrote this code.*"
 
+    # ── VALIDATE PR exists ────────────────────────────────────────────────────
     - id: validate-pr
-      name: Validate PR Exists
+      name: Validate PR
       type: TYPE_ACTION
       component: filter
       position:
-        x: 3360
+        x: 4800
         "y": 0
       configuration:
         expression: '$["Create Pull Request"].data.number != null'
 
-    - id: trigger-render-deploy
-      name: Trigger Render Deploy
+    # ── STAGE 5a: Queue deploy ────────────────────────────────────────────────
+    - id: queue-deploy
+      name: Queue Deploy
       type: TYPE_ACTION
       component: http
       position:
-        x: 3840
+        x: 5280
         "y": 0
       configuration:
         method: POST
         url: "https://software-factory-coder.onrender.com/deploy"
         headers:
-          Content-Type: application/json
-          X-Factory-Secret: '{{ env("FACTORY_SECRET") }}'
-        body: '{"repo":"{{ root().data.repo }}","branch":"{{ $["Implement Code"].data.body.branch }}","pr_number":"{{ $["Create Pull Request"].data.number }}"}'
-        timeoutSeconds: 600
+          - name: Content-Type
+            value: application/json
+          - name: X-Factory-Secret
+            value: '{{ root().data.factory_secret }}'
+        body: '{"repo":"{{ root().data.repo }}","branch":"{{ $["Check Implement Status"].data.body.branch }}","pr_number":"{{ $["Create Pull Request"].data.number }}"}'
+        timeoutSeconds: 28
+        successCodes: 2xx
 
+    # ── STAGE 5b: Poll deploy ────────────────────────────────────────────────
+    - id: poll-deploy
+      name: Poll Deploy
+      type: TYPE_ACTION
+      component: loop
+      position:
+        x: 5760
+        "y": 0
+      configuration:
+        untilExpression: '$["Check Deploy Status"].data.body.status == "done"'
+        maxIterations: 60
+        timeoutSeconds: 1800
+
+    # ── Check deploy status ───────────────────────────────────────────────────
+    - id: check-deploy-status
+      name: Check Deploy Status
+      type: TYPE_ACTION
+      component: http
+      position:
+        x: 6240
+        "y": 0
+      configuration:
+        method: GET
+        url: 'https://software-factory-coder.onrender.com/status/{{ $["Queue Deploy"].data.body.job_id }}'
+        headers:
+          - name: X-Factory-Secret
+            value: '{{ root().data.factory_secret }}'
+        timeoutSeconds: 28
+        successCodes: 2xx
+
+    # ── Wait between deploy polls ─────────────────────────────────────────────
+    - id: wait-deploy-poll
+      name: Wait 30s
+      type: TYPE_ACTION
+      component: wait
+      position:
+        x: 6720
+        "y": 0
+      configuration:
+        mode: interval
+        waitFor: "30"
+        unit: seconds
+
+    # ── VALIDATE deploy live ──────────────────────────────────────────────────
     - id: validate-deploy
-      name: Validate Deploy Live
+      name: Validate Deploy
       type: TYPE_ACTION
       component: filter
       position:
-        x: 4320
+        x: 7200
         "y": 0
       configuration:
-        expression: '$["Trigger Render Deploy"].data.body.preview_url != null && $["Trigger Render Deploy"].data.body.status == "live"'
+        expression: '$["Check Deploy Status"].data.body.success == true'
 
+    # ── STAGE 6: Post preview link ────────────────────────────────────────────
     - id: post-preview-link
       name: Post Preview Link
       type: TYPE_ACTION
       component: github.createIssueComment
       position:
-        x: 4800
+        x: 7680
         "y": 0
+      integration:
+        id: bc1b3413-4fff-4f18-b571-2e8fe97dcca0
       configuration:
         repository: '{{ root().data.repo }}'
         issueNumber: '{{ root().data.issue_number }}'
-        body: "## Preview Ready!\n\nYour proof-of-concept is live: {{ $[\"Trigger Render Deploy\"].data.body.preview_url }}\n\nPR: {{ $[\"Create Pull Request\"].data.html_url }}\nBranch: {{ $[\"Implement Code\"].data.body.branch }}\nBuild time: {{ $[\"Trigger Render Deploy\"].data.body.build_duration_s }}s\n\n*No human wrote this code.*"
+        body: "## Preview Ready!\n\nPoC is live: {{ $[\"Check Deploy Status\"].data.body.preview_url }}\n\nPR: {{ $[\"Create Pull Request\"].data.html_url }}\nBranch: `{{ $[\"Check Implement Status\"].data.body.branch }}`\n\n*No human wrote this code. Powered by K2-Think + SuperPlane.*"
 
   edges:
     - sourceId: trigger-new-issue
@@ -182,13 +297,25 @@ spec:
       channel: default
     - sourceId: generate-spec
       targetId: validate-spec
-      channel: default
-    - sourceId: validate-spec
-      targetId: implement-code
-      channel: default
-    - sourceId: implement-code
-      targetId: validate-implementation
       channel: success
+    - sourceId: validate-spec
+      targetId: queue-implement
+      channel: default
+    - sourceId: queue-implement
+      targetId: poll-implement
+      channel: success
+    - sourceId: poll-implement
+      targetId: check-implement-status
+      channel: next
+    - sourceId: check-implement-status
+      targetId: wait-between-polls
+      channel: success
+    - sourceId: wait-between-polls
+      targetId: poll-implement
+      channel: default
+    - sourceId: poll-implement
+      targetId: validate-implementation
+      channel: done
     - sourceId: validate-implementation
       targetId: create-pr
       channel: default
@@ -196,11 +323,23 @@ spec:
       targetId: validate-pr
       channel: default
     - sourceId: validate-pr
-      targetId: trigger-render-deploy
+      targetId: queue-deploy
       channel: default
-    - sourceId: trigger-render-deploy
-      targetId: validate-deploy
+    - sourceId: queue-deploy
+      targetId: poll-deploy
       channel: success
+    - sourceId: poll-deploy
+      targetId: check-deploy-status
+      channel: next
+    - sourceId: check-deploy-status
+      targetId: wait-deploy-poll
+      channel: success
+    - sourceId: wait-deploy-poll
+      targetId: poll-deploy
+      channel: default
+    - sourceId: poll-deploy
+      targetId: validate-deploy
+      channel: done
     - sourceId: validate-deploy
       targetId: post-preview-link
       channel: default

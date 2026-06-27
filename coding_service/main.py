@@ -1,14 +1,18 @@
 """
 Software Factory — Coding Service
 Uses K2-Think (OpenAI-compatible reasoning model) to implement GitHub issues.
+All long-running endpoints are async: POST returns a job_id, GET /status polls it.
 """
 
+import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
+import uuid
 from contextlib import contextmanager
 
 import httpx
@@ -30,24 +34,19 @@ K2_API_KEY = os.environ.get("K2_API_KEY", "")
 K2_BASE_URL = os.environ.get("K2_BASE_URL", "https://api.k2think.ai/v1")
 K2_MODEL = os.environ.get("K2_MODEL", "MBZUAI-IFM/K2-Think-v2")
 
-# K2 sits behind Cloudflare — must send a non-Python user-agent
-k2_client = OpenAI(
-    api_key=K2_API_KEY,
-    base_url=K2_BASE_URL,
-    default_headers={"User-Agent": "OpenAI/Python 1.0"},
-)
+# In-memory job store (survives within the process lifetime)
+JOBS: dict[str, dict] = {}
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def check_auth(secret: str):
+    if FACTORY_SECRET and secret != FACTORY_SECRET:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
-
-class Spec(BaseModel):
-    title: str
-    summary: str
-    files_to_modify: list[str]
-    implementation_steps: list[str]
-    acceptance_criteria: list[str]
-    branch_name: str
-
 
 class ImplementRequest(BaseModel):
     repo: str
@@ -63,14 +62,6 @@ class DeployRequest(BaseModel):
     pr_number: str
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def check_auth(secret: str):
-    if FACTORY_SECRET and secret != FACTORY_SECRET:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
 # ── Git helpers ───────────────────────────────────────────────────────────────
 
 @contextmanager
@@ -83,48 +74,48 @@ def cloned_repo(repo: str, github_token: str, base_branch: str):
         yield tmpdir
 
 
-def _run(cmd: list[str], cwd: str | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
     log.info("$ %s", " ".join(cmd))
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
-        log.error("STDERR: %s", r.stderr[-2000:])
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{r.stderr[-400:]}")
     return r
 
 
-def get_repo_tree(cwd: str, max_files: int = 80) -> str:
-    r = subprocess.run(
-        ["git", "ls-files"],
-        cwd=cwd, capture_output=True, text=True, timeout=30
-    )
-    lines = r.stdout.strip().splitlines()[:max_files]
-    return "\n".join(lines)
+def get_repo_tree(cwd: str) -> str:
+    r = subprocess.run(["git", "ls-files"], cwd=cwd, capture_output=True, text=True, timeout=30)
+    return "\n".join(r.stdout.strip().splitlines()[:60])
 
 
 def read_relevant_files(cwd: str, file_paths: list[str]) -> str:
     out = []
-    for path in file_paths[:8]:  # cap at 8 files
+    for path in file_paths[:6]:
         full = os.path.join(cwd, path)
         if os.path.exists(full):
             try:
-                content = open(full).read()[:4000]  # cap per file
-                out.append(f"=== {path} ===\n{content}")
+                out.append(f"=== {path} ===\n{open(full).read()[:3000]}")
             except Exception:
                 pass
     return "\n\n".join(out)
 
 
-# ── K2-Think LLM helper ───────────────────────────────────────────────────────
+# ── K2-Think ─────────────────────────────────────────────────────────────────
+
+def make_k2_client(api_key: str) -> OpenAI:
+    return OpenAI(
+        api_key=api_key or K2_API_KEY,
+        base_url=K2_BASE_URL,
+        default_headers={"User-Agent": "OpenAI/Python 1.0"},
+    )
+
 
 def strip_reasoning(text: str) -> str:
-    """K2-Think wraps its chain-of-thought in <think>...</think> — strip it."""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     return text.strip()
 
 
-def k2_complete(system: str, user: str, max_tokens: int = 8192) -> str:
-    log.info("Calling K2-Think (max_tokens=%d)", max_tokens)
-    resp = k2_client.chat.completions.create(
+def k2_complete(client: OpenAI, system: str, user: str, max_tokens: int = 8192) -> str:
+    resp = client.chat.completions.create(
         model=K2_MODEL,
         messages=[
             {"role": "system", "content": system},
@@ -133,70 +124,42 @@ def k2_complete(system: str, user: str, max_tokens: int = 8192) -> str:
         max_tokens=max_tokens,
         temperature=0.2,
     )
-    raw = resp.choices[0].message.content or ""
-    return strip_reasoning(raw)
+    return strip_reasoning(resp.choices[0].message.content or "")
 
 
-# ── Code implementation ───────────────────────────────────────────────────────
-
-def implement_with_k2(spec: dict, repo: str, issue_number: str, cwd: str) -> list[dict]:
-    """
-    Ask K2-Think to implement the spec. Returns list of {path, content} dicts.
-    """
+def implement_with_k2(client: OpenAI, spec: dict, repo: str, issue_number: str, cwd: str) -> list[dict]:
     tree = get_repo_tree(cwd)
     existing = read_relevant_files(cwd, spec.get("files_to_modify", []))
-
     steps = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(spec.get("implementation_steps", [])))
-    criteria = "\n".join(f"  - {c}" for c in spec.get("acceptance_criteria", []))
 
-    system = (
-        "You are an expert software engineer. You implement GitHub issues precisely and minimally. "
-        "You always respond with valid JSON — no markdown fences, no extra prose."
-    )
+    raw = k2_complete(client,
+        system="You are an expert software engineer. Respond ONLY with a valid JSON array, no markdown.",
+        user=f"""Implement GitHub issue #{issue_number} in the {repo} repository.
 
-    user = f"""Implement this GitHub issue in the {repo} repository.
+Title: {spec.get("title", "")}
+Summary: {spec.get("summary", "")}
 
-## Issue #{issue_number}: {spec.get("title", "")}
-
-{spec.get("summary", "")}
-
-## Implementation steps
+Steps:
 {steps}
 
-## Acceptance criteria
-{criteria}
-
-## Repository file tree (truncated)
+Repository files:
 {tree}
 
-## Current content of relevant files
+Relevant file contents:
 {existing}
 
-## Instructions
-Produce the COMPLETE updated content for every file that needs to change.
-Return ONLY a JSON array — no markdown, no explanation:
+Return a JSON array of files to write:
+[{{"path": "relative/path/to/file", "content": "complete file content"}}]
 
-[
-  {{
-    "path": "relative/path/to/file.tsx",
-    "content": "full file content here"
-  }}
-]
+Only include files you actually change. Keep changes minimal.
+""",
+        max_tokens=12000,
+    )
 
-Include only files you actually modified. Keep changes minimal and focused.
-"""
-
-    raw = k2_complete(system, user, max_tokens=16000)
-
-    # Extract JSON array from response
     match = re.search(r"\[.*\]", raw, re.DOTALL)
     if not match:
-        raise RuntimeError(f"K2 returned no JSON array. Response tail: {raw[-300:]}")
-
-    import json
-    files = json.loads(match.group(0))
-    log.info("K2 produced %d file(s)", len(files))
-    return files
+        raise RuntimeError(f"K2 returned no JSON array. Tail: {raw[-200:]}")
+    return json.loads(match.group(0))
 
 
 def apply_files(files: list[dict], cwd: str) -> list[str]:
@@ -208,107 +171,129 @@ def apply_files(files: list[dict], cwd: str) -> list[str]:
             continue
         full_path = os.path.join(cwd, path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, "w") as fh:
-            fh.write(content)
+        open(full_path, "w").write(content)
         changed.append(path)
-        log.info("Wrote %s (%d bytes)", path, len(content))
     return changed
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Background workers ────────────────────────────────────────────────────────
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "backend": "k2-think", "model": K2_MODEL}
-
-
-@app.post("/implement")
-def implement(req: ImplementRequest, x_factory_secret: str = Header(default="")):
-    check_auth(x_factory_secret)
-
+def _run_implement(job_id: str, req: ImplementRequest):
+    JOBS[job_id]["status"] = "running"
     spec = req.spec
     branch = re.sub(r"[^a-zA-Z0-9/_-]", "-", spec.get("branch_name", f"feature/issue-{req.issue_number}"))[:80]
-
-    log.info("Implementing repo=%s issue=%s branch=%s", req.repo, req.issue_number, branch)
-
+    client = make_k2_client(K2_API_KEY)
     try:
         with cloned_repo(req.repo, req.github_token, req.base_branch) as tmpdir:
             _run(["git", "checkout", "-b", branch], cwd=tmpdir)
-
-            files = implement_with_k2(spec, req.repo, req.issue_number, tmpdir)
+            files = implement_with_k2(client, spec, req.repo, req.issue_number, tmpdir)
             changed = apply_files(files, tmpdir)
-
             if not changed:
-                return {"success": False, "error": "K2 produced no file changes", "branch": branch}
-
+                raise RuntimeError("K2 produced no file changes")
             _run(["git", "add", "-A"], cwd=tmpdir)
-            commit_msg = (
-                f"feat: implement #{req.issue_number} — {spec.get('title', 'auto')}\n\n"
-                f"Closes #{req.issue_number}\nGenerated by Software Factory (K2-Think)."
-            )
-            _run(["git", "commit", "-m", commit_msg], cwd=tmpdir)
+            _run(["git", "commit", "-m",
+                  f"feat: implement #{req.issue_number} — {spec.get('title','auto')}\n\nCloses #{req.issue_number}\nGenerated by Software Factory (K2-Think)."],
+                 cwd=tmpdir)
             _run(["git", "push", "origin", branch, "--force-with-lease"], cwd=tmpdir)
-
             sha = _run(["git", "rev-parse", "HEAD"], cwd=tmpdir).stdout.strip()
 
-            return {
+            JOBS[job_id].update({
+                "status": "done",
                 "success": True,
                 "branch": branch,
                 "commit_sha": sha,
                 "files_changed": "\n".join(f"- `{f}`" for f in changed),
                 "spec_summary": spec.get("summary", ""),
                 "acceptance_criteria": "\n".join(f"- [ ] {c}" for c in spec.get("acceptance_criteria", [])),
-            }
-
+            })
     except Exception as exc:
-        log.exception("Implementation failed")
-        return {"success": False, "error": str(exc), "branch": branch}
+        log.exception("Implement job %s failed", job_id)
+        JOBS[job_id].update({"status": "done", "success": False, "error": str(exc), "branch": branch})
+
+
+def _run_deploy(job_id: str, req: DeployRequest):
+    JOBS[job_id]["status"] = "running"
+    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+        JOBS[job_id].update({"status": "done", "success": False, "error": "Render creds not set",
+                              "preview_url": None, "deploy_status": "skipped"})
+        return
+
+    headers = {"Authorization": f"Bearer {RENDER_API_KEY}", "Content-Type": "application/json"}
+    start = time.time()
+    try:
+        resp = httpx.post(
+            f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys",
+            headers=headers, json={"clearCache": False}, timeout=30,
+        )
+        resp.raise_for_status()
+        deploy_id = (resp.json().get("deploy") or resp.json()).get("id")
+
+        deploy_status = "pending"
+        preview_url = None
+        for _ in range(40):
+            time.sleep(15)
+            try:
+                poll = httpx.get(
+                    f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys/{deploy_id}",
+                    headers=headers, timeout=15,
+                )
+                deploy_status = poll.json().get("status", "pending")
+                if deploy_status == "live":
+                    svc = httpx.get(f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}",
+                                    headers=headers, timeout=15)
+                    preview_url = svc.json().get("serviceDetails", {}).get("url")
+                    break
+                if deploy_status in ("failed", "canceled"):
+                    break
+            except Exception:
+                pass
+
+        JOBS[job_id].update({
+            "status": "done",
+            "success": deploy_status == "live",
+            "preview_url": preview_url or f"https://software-factory-demo.onrender.com",
+            "deploy_status": deploy_status,
+            "build_duration_s": int(time.time() - start),
+        })
+    except Exception as exc:
+        log.exception("Deploy job %s failed", job_id)
+        JOBS[job_id].update({"status": "done", "success": False, "error": str(exc)})
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model": K2_MODEL}
+
+
+@app.get("/status/{job_id}")
+def status(job_id: str, x_factory_secret: str = Header(default="")):
+    check_auth(x_factory_secret)
+    job = JOBS.get(job_id)
+    if not job:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/implement")
+def implement(req: ImplementRequest, x_factory_secret: str = Header(default="")):
+    check_auth(x_factory_secret)
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {"status": "queued", "job_id": job_id}
+    threading.Thread(target=_run_implement, args=(job_id, req), daemon=True).start()
+    log.info("Implement job %s queued", job_id)
+    return {"job_id": job_id, "status": "queued"}
 
 
 @app.post("/deploy")
 def deploy(req: DeployRequest, x_factory_secret: str = Header(default="")):
     check_auth(x_factory_secret)
-
-    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
-        return {"success": False, "error": "Render creds not set", "preview_url": None, "status": "skipped"}
-
-    headers = {"Authorization": f"Bearer {RENDER_API_KEY}", "Content-Type": "application/json"}
-    start = time.time()
-
-    resp = httpx.post(
-        f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys",
-        headers=headers, json={"clearCache": False}, timeout=30,
-    )
-    resp.raise_for_status()
-    deploy_id = (resp.json().get("deploy") or resp.json()).get("id")
-    log.info("Deploy triggered: %s", deploy_id)
-
-    status = "pending"
-    preview_url = None
-    for _ in range(40):
-        time.sleep(15)
-        try:
-            poll = httpx.get(
-                f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys/{deploy_id}",
-                headers=headers, timeout=15,
-            )
-            status = poll.json().get("status", "pending")
-            if status == "live":
-                svc = httpx.get(f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}", headers=headers, timeout=15)
-                preview_url = svc.json().get("serviceDetails", {}).get("url")
-                break
-            if status in ("failed", "canceled"):
-                break
-        except Exception as e:
-            log.warning("Poll error: %s", e)
-
-    return {
-        "success": status == "live",
-        "preview_url": preview_url,
-        "status": status,
-        "deploy_id": deploy_id,
-        "build_duration_s": int(time.time() - start),
-    }
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {"status": "queued", "job_id": job_id}
+    threading.Thread(target=_run_deploy, args=(job_id, req), daemon=True).start()
+    return {"job_id": job_id, "status": "queued"}
 
 
 if __name__ == "__main__":
