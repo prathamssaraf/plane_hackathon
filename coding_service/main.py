@@ -137,6 +137,7 @@ def make_ollama_client() -> OpenAI:
         base_url=OLLAMA_BASE_URL,
         default_headers={"ngrok-skip-browser-warning": "true"},
         timeout=120.0,
+        max_retries=0,
     )
 
 
