@@ -1,0 +1,292 @@
+apiVersion: v1
+kind: Canvas
+metadata:
+  name: software-factory
+  description: >
+    Turns a GitHub issue into a deployed, clickable proof-of-concept with no
+    human touching the code. Each stage validates the previous one before
+    moving on.
+  isTemplate: false
+spec:
+  nodes:
+    # ── TRIGGER ──────────────────────────────────────────────────────────────
+    - id: trigger-new-issue
+      name: New Issue
+      type: TYPE_TRIGGER
+      component: start
+      paused: false
+      position:
+        x: 0
+        y: 0
+      configuration:
+        templates:
+          - name: Run Software Factory
+            parameters:
+              - name: issue_number
+                title: Issue Number
+                type: string
+                defaultString: "5368"
+                placeholder: GitHub issue number to implement
+              - name: repo
+                title: Repository (owner/name)
+                type: string
+                defaultString: "superplanehq/superplane"
+                placeholder: owner/repo
+              - name: base_branch
+                title: Base Branch
+                type: string
+                defaultString: "main"
+            payload:
+              issue_number: '{{ parameters["issue_number"] }}'
+              repo: '{{ parameters["repo"] }}'
+              base_branch: '{{ parameters["base_branch"] }}'
+
+    # ── STAGE 1: Read the issue ───────────────────────────────────────────────
+    - id: get-issue
+      name: Get Issue
+      type: TYPE_ACTION
+      component: github.getIssue
+      paused: false
+      position:
+        x: 300
+        y: 0
+      configuration:
+        repository: '{{ root().data.repo }}'
+        issueNumber: '{{ root().data.issue_number }}'
+
+    # ── STAGE 2: Generate a structured spec ──────────────────────────────────
+    - id: generate-spec
+      name: Generate Spec
+      type: TYPE_ACTION
+      component: claude.textPrompt
+      paused: false
+      position:
+        x: 600
+        y: 0
+      configuration:
+        model: claude-sonnet-4-6
+        prompt: |-
+          You are a senior software architect. Given the GitHub issue below, produce
+          a precise, actionable implementation spec that a coding agent can follow.
+
+          Repository: {{ root().data.repo }}
+          Issue #{{ root().data.issue_number }}: {{ $["Get Issue"].data.title }}
+
+          Issue body:
+          {{ $["Get Issue"].data.body }}
+
+          Respond with ONLY a JSON object (no markdown fences) in this exact shape:
+          {
+            "title": "brief implementation title",
+            "summary": "2-3 sentence description of what needs to be built",
+            "files_to_modify": ["list of specific file paths likely to change"],
+            "implementation_steps": [
+              "ordered, concrete coding steps"
+            ],
+            "acceptance_criteria": [
+              "testable conditions that define done"
+            ],
+            "branch_name": "feature/issue-{{ root().data.issue_number }}-short-slug"
+          }
+
+    # ── VALIDATE spec is non-empty and references real content ───────────────
+    - id: validate-spec
+      name: Validate Spec
+      type: TYPE_ACTION
+      component: filter
+      paused: false
+      position:
+        x: 900
+        y: 0
+      configuration:
+        condition: >-
+          $["Generate Spec"].data.text != null &&
+          $["Generate Spec"].data.text.length > 100
+
+    # ── STAGE 3: Implement the code ───────────────────────────────────────────
+    # Calls our Render-hosted coding service which:
+    #   - clones the repo on a branch
+    #   - runs the Claude Code CLI with the spec as task
+    #   - commits & pushes the changes
+    - id: implement-code
+      name: Implement Code
+      type: TYPE_ACTION
+      component: http
+      paused: false
+      position:
+        x: 1200
+        y: 0
+      configuration:
+        method: POST
+        url: 'https://software-factory-coder.onrender.com/implement'
+        headers:
+          Content-Type: application/json
+          X-Factory-Secret: '{{ env("FACTORY_SECRET") }}'
+        body: |-
+          {
+            "repo": "{{ root().data.repo }}",
+            "issue_number": "{{ root().data.issue_number }}",
+            "base_branch": "{{ root().data.base_branch }}",
+            "spec": {{ $["Generate Spec"].data.text }},
+            "github_token": "{{ env("GITHUB_TOKEN") }}"
+          }
+        timeout: 600000
+
+    # ── VALIDATE implementation succeeded (build passed) ────────────────────
+    - id: validate-implementation
+      name: Validate Build
+      type: TYPE_ACTION
+      component: filter
+      paused: false
+      position:
+        x: 1500
+        y: 0
+      configuration:
+        condition: >-
+          $["Implement Code"].data.body.success == true
+
+    # ── STAGE 4: Open Pull Request ───────────────────────────────────────────
+    - id: create-pr
+      name: Create Pull Request
+      type: TYPE_ACTION
+      component: github.createPullRequest
+      paused: false
+      position:
+        x: 1800
+        y: 0
+      configuration:
+        repository: '{{ root().data.repo }}'
+        title: 'feat(#{{ root().data.issue_number }}): {{ $["Get Issue"].data.title }}'
+        head: '{{ $["Implement Code"].data.body.branch }}'
+        base: '{{ root().data.base_branch }}'
+        body: |-
+          ## 🤖 Auto-generated PoC
+
+          Closes #{{ root().data.issue_number }}
+
+          ### What was built
+          {{ $["Implement Code"].data.body.spec_summary }}
+
+          ### Files changed
+          {{ $["Implement Code"].data.body.files_changed }}
+
+          ### Acceptance criteria
+          {{ $["Implement Code"].data.body.acceptance_criteria }}
+
+          ---
+          *Generated by [Software Factory](https://github.com/superplanehq/software-factory) on SuperPlane.*
+
+    # ── VALIDATE PR exists ────────────────────────────────────────────────────
+    - id: validate-pr
+      name: Validate PR Exists
+      type: TYPE_ACTION
+      component: filter
+      paused: false
+      position:
+        x: 2100
+        y: 0
+      configuration:
+        condition: '$["Create Pull Request"].data.number != null'
+
+    # ── STAGE 5: Trigger Render preview deploy ────────────────────────────────
+    - id: trigger-render-deploy
+      name: Trigger Render Deploy
+      type: TYPE_ACTION
+      component: http
+      paused: false
+      position:
+        x: 2400
+        y: 0
+      configuration:
+        method: POST
+        url: 'https://software-factory-coder.onrender.com/deploy'
+        headers:
+          Content-Type: application/json
+          X-Factory-Secret: '{{ env("FACTORY_SECRET") }}'
+        body: |-
+          {
+            "repo": "{{ root().data.repo }}",
+            "branch": "{{ $["Implement Code"].data.body.branch }}",
+            "pr_number": "{{ $["Create Pull Request"].data.number }}"
+          }
+        timeout: 600000
+
+    # ── VALIDATE deploy is live ────────────────────────────────────────────────
+    - id: validate-deploy
+      name: Validate Deploy Live
+      type: TYPE_ACTION
+      component: filter
+      paused: false
+      position:
+        x: 2700
+        y: 0
+      configuration:
+        condition: >-
+          $["Trigger Render Deploy"].data.body.preview_url != null &&
+          $["Trigger Render Deploy"].data.body.status == "live"
+
+    # ── STAGE 6: Post preview link on the PR ─────────────────────────────────
+    - id: post-preview-link
+      name: Post Preview Link
+      type: TYPE_ACTION
+      component: github.createIssueComment
+      paused: false
+      position:
+        x: 3000
+        y: 0
+      configuration:
+        repository: '{{ root().data.repo }}'
+        issueNumber: '{{ root().data.issue_number }}'
+        body: |-
+          ## 🚀 Preview Ready!
+
+          Your proof-of-concept is live and ready to test:
+          **[Open Preview →]({{ $["Trigger Render Deploy"].data.body.preview_url }})**
+
+          | | |
+          |---|---|
+          | Pull Request | {{ $["Create Pull Request"].data.html_url }} |
+          | Branch | `{{ $["Implement Code"].data.body.branch }}` |
+          | Deploy | {{ $["Trigger Render Deploy"].data.body.preview_url }} |
+          | Build time | {{ $["Trigger Render Deploy"].data.body.build_duration_s }}s |
+
+          *No human wrote this code.*
+
+  edges:
+    - sourceId: trigger-new-issue
+      targetId: get-issue
+      channel: default
+    - sourceId: get-issue
+      targetId: generate-spec
+      channel: default
+    - sourceId: generate-spec
+      targetId: validate-spec
+      channel: default
+    - sourceId: validate-spec
+      targetId: implement-code
+      channel: default
+    - sourceId: implement-code
+      targetId: validate-implementation
+      channel: default
+    - sourceId: validate-implementation
+      targetId: create-pr
+      channel: default
+    - sourceId: create-pr
+      targetId: validate-pr
+      channel: default
+    - sourceId: validate-pr
+      targetId: trigger-render-deploy
+      channel: default
+    - sourceId: trigger-render-deploy
+      targetId: validate-deploy
+      channel: default
+    - sourceId: validate-deploy
+      targetId: post-preview-link
+      channel: default
+
+  changeManagement:
+    enabled: false
+    approvals:
+      - type: TYPE_ANYONE
+        userId: ''
+        roleName: ''

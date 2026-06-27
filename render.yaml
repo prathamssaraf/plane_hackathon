@@ -1,0 +1,34 @@
+services:
+  # ── Coding Service ───────────────────────────────────────────────────────────
+  - type: web
+    name: software-factory-coder
+    runtime: docker
+    dockerfilePath: ./coding_service/Dockerfile
+    plan: standard
+    region: oregon
+    autoDeploy: true
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false   # set in Render dashboard
+      - key: FACTORY_SECRET
+        sync: false
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_SERVICE_ID
+        sync: false
+
+  # ── Demo App ──────────────────────────────────────────────────────────────────
+  # The target app that the factory deploys previews of.
+  - type: web
+    name: software-factory-demo
+    runtime: node
+    rootDir: demo_app
+    buildCommand: npm ci && npm run build
+    startCommand: npm run preview -- --host 0.0.0.0 --port $PORT
+    plan: free
+    region: oregon
+    autoDeploy: true
+    pullRequestPreviewsEnabled: true
+    envVars:
+      - key: PORT
+        value: "4173"
