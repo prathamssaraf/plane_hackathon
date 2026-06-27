@@ -123,10 +123,20 @@ def make_k2_client(api_key: str) -> OpenAI:
 
 
 def make_ollama_client() -> OpenAI:
+    import ipaddress
+    try:
+        host = OLLAMA_BASE_URL.split("//")[1].split("/")[0].split(":")[0]
+        ipaddress.ip_address(host)
+        is_private = ipaddress.ip_address(host).is_private
+    except Exception:
+        is_private = False
+    if is_private:
+        raise RuntimeError(f"OLLAMA_BASE_URL ({OLLAMA_BASE_URL}) is a private/unroutable address from Render. Set OLLAMA_BASE_URL env var to the public ngrok URL.")
     return OpenAI(
         api_key="ollama",
         base_url=OLLAMA_BASE_URL,
         default_headers={"ngrok-skip-browser-warning": "true"},
+        timeout=120.0,
     )
 
 
@@ -153,7 +163,8 @@ def implement_with_gemma(spec: dict, repo: str, issue_number: str, cwd: str) -> 
     existing = read_relevant_files(cwd, spec.get("files_to_modify", []))
     steps = "; ".join(spec.get("implementation_steps", [])[:5])
 
-    client = make_ollama_client()
+    client = make_ollama_client()  # raises immediately if private IP
+    log.info("Calling Gemma at %s model=%s", OLLAMA_BASE_URL, OLLAMA_MODEL)
     resp = client.chat.completions.create(
         model=OLLAMA_MODEL,
         messages=[
