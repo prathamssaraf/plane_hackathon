@@ -1,42 +1,27 @@
-import { useState } from "react";
-import MarkdownView from "./components/MarkdownView";
-import CanvasDiff from "./components/CanvasDiff";
-import RunInspection from "./components/RunInspection";
-import "./App.css";
+import React from 'react';
+import './App.css';
+import { ThemeProvider } from './context/ThemeContext';
+import ThemeToggle from './components/ThemeToggle';
+import CanvasDiff from './components/CanvasDiff';
 
-const TABS = [
-  { id: "markdown", label: "Markdown View (#5368)" },
-  { id: "canvas-diff", label: "Canvas Diff (#5366)" },
-  { id: "run-inspection", label: "Run Inspection (#5704)" },
-];
-
-export default function App() {
-  const [tab, setTab] = useState("markdown");
-
+function App() {
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="header-inner">
-          <span className="logo">⚙️ Software Factory</span>
-          <span className="subtitle">SuperPlane Hackathon Demo — auto-generated PoC</span>
-        </div>
-      </header>
-      <nav className="tab-bar">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            className={`tab-btn${tab === t.id ? " active" : ""}`}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
-      <main className="tab-content">
-        {tab === "markdown" && <MarkdownView />}
-        {tab === "canvas-diff" && <CanvasDiff />}
-        {tab === "run-inspection" && <RunInspection />}
-      </main>
-    </div>
+    <ThemeProvider>
+      <div className="app-container">
+        <header>
+          <h1>Demo App</h1>
+          <ThemeToggle />
+        </header>
+        <main>
+          <section className="card">
+            <h2>Code Comparison</h2>
+            <p>Explore the differences between versions using our interactive canvas.</p>
+            <CanvasDiff />
+          </section>
+        </main>
+      </div>
+    </ThemeProvider>
   );
 }
+
+export default App;
