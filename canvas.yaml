@@ -34,10 +34,6 @@ spec:
                 title: GitHub Token
                 type: string
                 placeholder: ghp_...
-              - name: k2_api_key
-                title: K2 API Key
-                type: string
-                placeholder: IFM-...
               - name: factory_secret
                 title: Factory Secret
                 type: string
@@ -47,7 +43,6 @@ spec:
               repo: '{{ parameters["repo"] }}'
               base_branch: '{{ parameters["base_branch"] }}'
               github_token: '{{ parameters["github_token"] }}'
-              k2_api_key: '{{ parameters["k2_api_key"] }}'
               factory_secret: '{{ parameters["factory_secret"] }}'
 
     # ── STAGE 1: Read the issue ───────────────────────────────────────────────
@@ -87,7 +82,7 @@ spec:
             value: application/json
           - name: X-Factory-Secret
             value: '{{ root().data.factory_secret }}'
-        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","github_token":"{{ root().data.github_token }}","issue_title":"{{ $[''Get Issue''].data.body.title }}","k2_api_key":"{{ root().data.k2_api_key }}"}'
+        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","github_token":"{{ root().data.github_token }}","issue_title":"{{ $[''Get Issue''].data.body.title }}"}'
         timeoutSeconds: 28
         successCodes: 2xx
 
