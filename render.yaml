@@ -4,7 +4,7 @@ services:
     name: software-factory-coder
     runtime: docker
     dockerfilePath: ./coding_service/Dockerfile
-    plan: standard
+    plan: free
     region: oregon
     autoDeploy: true
     envVars:
