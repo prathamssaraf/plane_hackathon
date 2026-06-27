@@ -237,8 +237,9 @@ def apply_files(files: list[dict], cwd: str) -> list[str]:
 
 # ── Background workers ────────────────────────────────────────────────────────
 
-def _gemma_spec(issue_number: str, repo: str, issue_title: str) -> dict:
+def _gemma_spec(issue_number: str, repo: str, issue_title: str, job_id: str) -> dict:
     client = make_ollama_client()
+    short_id = job_id[:8]
     resp = client.chat.completions.create(
         model=OLLAMA_MODEL,
         messages=[
@@ -248,7 +249,7 @@ def _gemma_spec(issue_number: str, repo: str, issue_title: str) -> dict:
                 f"Title: {issue_title or 'see issue'}\n\n"
                 f"Return JSON with fields: title, summary, files_to_modify (array), "
                 f"implementation_steps (array), acceptance_criteria (array), "
-                f"branch_name (string, use feature/issue-{issue_number})."
+                f"branch_name (string, use feature/issue-{issue_number}-{short_id})."
             )},
         ],
         temperature=0.2,
@@ -261,14 +262,14 @@ def _gemma_spec(issue_number: str, repo: str, issue_title: str) -> dict:
             return json.loads(match.group(0))
         except Exception:
             pass
-    return {"branch_name": f"feature/issue-{issue_number}", "title": issue_title, "summary": "", "files_to_modify": [], "implementation_steps": [], "acceptance_criteria": []}
+    return {"branch_name": f"feature/issue-{issue_number}-{short_id}", "title": issue_title, "summary": "", "files_to_modify": [], "implementation_steps": [], "acceptance_criteria": []}
 
 
 def _run_implement(job_id: str, req: ImplementRequest):
     JOBS[job_id]["status"] = "running"
     spec = req.spec
     if not spec:
-        spec = _gemma_spec(req.issue_number, req.repo, req.issue_title)
+        spec = _gemma_spec(req.issue_number, req.repo, req.issue_title, job_id)
     branch = re.sub(r"[^a-zA-Z0-9/_-]", "-", spec.get("branch_name", f"feature/issue-{req.issue_number}"))[:80]
     try:
         with cloned_repo(req.repo, req.github_token, req.base_branch) as tmpdir:
