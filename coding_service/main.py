@@ -48,6 +48,14 @@ def check_auth(secret: str):
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
+class SpecRequest(BaseModel):
+    repo: str
+    issue_number: str
+    issue_title: str
+    issue_body: str = ""
+    k2_api_key: str = ""
+
+
 class ImplementRequest(BaseModel):
     repo: str
     issue_number: str
@@ -265,6 +273,29 @@ def _run_deploy(job_id: str, req: DeployRequest):
 @app.get("/health")
 def health():
     return {"status": "ok", "model": K2_MODEL}
+
+
+@app.post("/spec")
+def generate_spec(req: SpecRequest, x_factory_secret: str = Header(default="")):
+    check_auth(x_factory_secret)
+    client = make_k2_client(req.k2_api_key or K2_API_KEY)
+    raw = k2_complete(client,
+        system="You are a software architect. Reply ONLY with a valid JSON object, no markdown, no explanation.",
+        user=(
+            f"Spec GitHub issue #{req.issue_number} in repo {req.repo}.\n"
+            f"Title: {req.issue_title}\n"
+            f"Body: {req.issue_body[:500] if req.issue_body else 'N/A'}\n\n"
+            f"Return JSON with fields: title, summary, files_to_modify (array), "
+            f"implementation_steps (array), acceptance_criteria (array), "
+            f"branch_name (string, use feature/issue-{req.issue_number})."
+        ),
+        max_tokens=2048,
+    )
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"K2 returned no JSON: {raw[-200:]}")
+    return json.loads(match.group(0))
 
 
 @app.get("/status/{job_id}")

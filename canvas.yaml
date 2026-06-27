@@ -52,7 +52,7 @@ spec:
               repo_name: '{{ parameters["repo_name"] }}'
               base_branch: '{{ parameters["base_branch"] }}'
               github_token: '{{ parameters["github_token"] }}'
-              k2_auth: 'Bearer {{ parameters["k2_api_key"] }}'
+              k2_api_key: '{{ parameters["k2_api_key"] }}'
               factory_secret: '{{ parameters["factory_secret"] }}'
 
     # ── STAGE 1: Read the issue ───────────────────────────────────────────────
@@ -76,9 +76,9 @@ spec:
         timeoutSeconds: 28
         successCodes: 2xx
 
-    # ── STAGE 2: Generate spec via K2-Think ──────────────────────────────────
+    # ── STAGE 2: Generate spec via coding service ────────────────────────────
     - id: generate-spec
-      name: Generate Spec (K2)
+      name: Generate Spec
       type: TYPE_ACTION
       component: http
       position:
@@ -86,15 +86,13 @@ spec:
         "y": 0
       configuration:
         method: POST
-        url: "https://api.k2think.ai/v1/chat/completions"
+        url: "https://software-factory-coder.onrender.com/spec"
         headers:
-          - name: Authorization
-            value: '{{ root().data.k2_auth }}'
           - name: Content-Type
             value: application/json
-          - name: User-Agent
-            value: "OpenAI/Python 1.0"
-        body: '{"model":"MBZUAI-IFM/K2-Think-v2","max_tokens":2048,"temperature":0.2,"messages":[{"role":"system","content":"You are a software architect. Reply ONLY with a JSON object."},{"role":"user","content":"Spec this issue for a coding agent.\n\nRepo: {{ root().data.repo }}\nIssue #{{ root().data.issue_number }}: {{ $[''Get Issue''].data.body.title }}\n\nReturn ONLY this JSON:\n{\"title\":\"...\",\"summary\":\"...\",\"files_to_modify\":[\"...\"],\"implementation_steps\":[\"...\"],\"acceptance_criteria\":[\"...\"],\"branch_name\":\"feature/issue-{{ root().data.issue_number }}\"}"}]}'
+          - name: X-Factory-Secret
+            value: '{{ root().data.factory_secret }}'
+        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","issue_title":"{{ $[''Get Issue''].data.body.title }}","issue_body":"{{ $[''Get Issue''].data.body.body }}","k2_api_key":"{{ root().data.k2_api_key }}"}'
         timeoutSeconds: 30
         successCodes: 2xx
 
@@ -107,7 +105,7 @@ spec:
         x: 1440
         "y": 0
       configuration:
-        expression: '$["Generate Spec (K2)"].data.body.choices[0].message.content.length > 50'
+        expression: '$["Generate Spec"].data.body.title.length > 0'
 
     # ── STAGE 3a: Queue implementation job ───────────────────────────────────
     - id: queue-implement
@@ -125,7 +123,7 @@ spec:
             value: application/json
           - name: X-Factory-Secret
             value: '{{ root().data.factory_secret }}'
-        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","spec":{{ $["Generate Spec (K2)"].data.body.choices[0].message.content }},"github_token":"{{ root().data.github_token }}"}'
+        body: '{"repo":"{{ root().data.repo }}","issue_number":"{{ root().data.issue_number }}","base_branch":"{{ root().data.base_branch }}","spec":{{ $[''Generate Spec''].data.body }},"github_token":"{{ root().data.github_token }}"}'
         timeoutSeconds: 28
         successCodes: 2xx
 
