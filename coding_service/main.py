@@ -163,7 +163,7 @@ Return a JSON array of files to write:
 
 Only include files you actually change. Keep changes minimal.
 """,
-        max_tokens=12000,
+        max_tokens=4096,
     )
 
     match = re.search(r"\[.*\]", raw, re.DOTALL)

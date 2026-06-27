@@ -101,8 +101,8 @@ spec:
         "y": 0
       configuration:
         untilExpression: '$["Check Implement Status"].data.body.status == "done"'
-        maxIterations: 40
-        timeoutSeconds: 900
+        maxIterations: 80
+        timeoutSeconds: 1800
 
     # ── Check implementation status ────────────────────────────────────────────
     - id: check-implement-status
