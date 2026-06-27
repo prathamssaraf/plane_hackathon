@@ -45,6 +45,7 @@ spec:
             payload:
               issue_number: '{{ parameters["issue_number"] }}'
               repo: '{{ parameters["repo"] }}'
+              repo_name: '{{ parameters["repo"].split("/")[1] }}'
               base_branch: '{{ parameters["base_branch"] }}'
               github_token: '{{ parameters["github_token"] }}'
               k2_auth: 'Bearer {{ parameters["k2_api_key"] }}'
@@ -61,7 +62,7 @@ spec:
       integration:
         id: bc1b3413-4fff-4f18-b571-2e8fe97dcca0
       configuration:
-        repository: '{{ root().data.repo }}'
+        repository: '{{ root().data.repo_name }}'
         issueNumber: '{{ root().data.issue_number }}'
 
     # ── STAGE 2: Generate spec via K2-Think ──────────────────────────────────
@@ -182,7 +183,7 @@ spec:
       integration:
         id: bc1b3413-4fff-4f18-b571-2e8fe97dcca0
       configuration:
-        repository: '{{ root().data.repo }}'
+        repository: '{{ root().data.repo_name }}'
         title: 'feat(#{{ root().data.issue_number }}): {{ $["Get Issue"].data.title }}'
         head: '{{ $["Check Implement Status"].data.body.branch }}'
         base: '{{ root().data.base_branch }}'
@@ -284,7 +285,7 @@ spec:
       integration:
         id: bc1b3413-4fff-4f18-b571-2e8fe97dcca0
       configuration:
-        repository: '{{ root().data.repo }}'
+        repository: '{{ root().data.repo_name }}'
         issueNumber: '{{ root().data.issue_number }}'
         body: "## Preview Ready!\n\nPoC is live: {{ $[\"Check Deploy Status\"].data.body.preview_url }}\n\nPR: {{ $[\"Create Pull Request\"].data.html_url }}\nBranch: `{{ $[\"Check Implement Status\"].data.body.branch }}`\n\n*No human wrote this code. Powered by K2-Think + SuperPlane.*"
 
